@@ -1,0 +1,5 @@
+qemu-ios/
+qemu-ios-abi/
+*.o
+*.a
+build/

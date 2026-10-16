@@ -1,0 +1,2 @@
+/home/hatch/workspace/lighttouch-cross/emulator/qemu-ios/tests/guest-package/../../contrib/armv6-toolchain/armv6.sh: line 63: xcrun: command not found
+FAIL: valid C with -DCHECK_VALUE did not compile

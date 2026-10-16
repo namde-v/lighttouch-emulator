@@ -1,0 +1,3 @@
+tests/ipod/tcg-pages-io-test.sh: line 34: xxd: command not found
+tests/ipod/tcg-pages-io-test.sh: line 30: xxd: command not found
+FAIL the program never reached its end

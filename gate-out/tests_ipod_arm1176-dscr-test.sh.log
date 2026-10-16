@@ -1,0 +1,2 @@
+tests/ipod/arm1176-dscr-test.sh: line 26: xxd: command not found
+FAIL no verdict from the guest

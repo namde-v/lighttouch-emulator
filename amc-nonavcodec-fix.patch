@@ -1,0 +1,74 @@
+diff --git a/hw/arm/ipod_touch_amc.c b/hw/arm/ipod_touch_amc.c
+index d833085..1776a09 100644
+--- a/hw/arm/ipod_touch_amc.c
++++ b/hw/arm/ipod_touch_amc.c
+@@ -144,6 +144,35 @@ static bool amc_trace(void)
+ #define AMCT(fmt, ...) do { if (amc_trace()) { \
+     TRACE_PRINTF(trace_ipod_touch_amc_log, "[AMC] " fmt, ##__VA_ARGS__); } } while (0)
+ 
++/* DMA address helpers: pure range checks, no FFmpeg dependency, so they live
++ * outside the IT_HAVE_AVCODEC guard — amc_engine0() calls them unconditionally. */
++static bool amc_dram(IPodTouchAMCState *s, uint32_t addr, size_t size)
++{
++    return addr >= s->dram_base && addr - s->dram_base < s->dram_size &&
++           size <= s->dram_size - (addr - s->dram_base);
++}
++
++/* The engine's own memory, the aperture: AMC 2.1's DMA reads only this. */
++static bool amc_local(IPodTouchAMCState *s, uint32_t addr, size_t size)
++{
++    uint32_t limit = s->rev21 ? AMC_APERTURE_21 : AMC_BUF_SIZE;
++    return addr < limit && size <= limit - addr;
++}
++
++/*
++ * A bank 4 DMA address: bits 1:0 of a descriptor pointer tag its space,
++ * 1 = system memory, 2 = engine-local (7B500 c06e99f8). Returns the physical
++ * address, or -1 when it is not inside that space.
++ */
++static hwaddr amc_dma_addr(IPodTouchAMCState *s, bool local, uint32_t addr,
++                           size_t size)
++{
++    if (local) {
++        return amc_local(s, addr, size) ? s->buf_base + addr : -1;
++    }
++    return amc_dram(s, addr, size) ? addr : -1;
++}
++
+ #ifdef IT_HAVE_AVCODEC
+ /* ponytail: HLE of the 7E18 AAC-LC/HE-AAC, MP3 and ALAC decoder programs, and of any
+  * other program whose stream parameters are AAC's (amc_aac_rate). Other DE programs
+@@ -322,33 +351,6 @@ static void amc_decoder_close(IPodTouchAMCState *s)
+     }
+ }
+ 
+-static bool amc_dram(IPodTouchAMCState *s, uint32_t addr, size_t size)
+-{
+-    return addr >= s->dram_base && addr - s->dram_base < s->dram_size &&
+-           size <= s->dram_size - (addr - s->dram_base);
+-}
+-
+-/* The engine's own memory, the aperture: AMC 2.1's DMA reads only this. */
+-static bool amc_local(IPodTouchAMCState *s, uint32_t addr, size_t size)
+-{
+-    uint32_t limit = s->rev21 ? AMC_APERTURE_21 : AMC_BUF_SIZE;
+-    return addr < limit && size <= limit - addr;
+-}
+-
+-/*
+- * A bank 4 DMA address: bits 1:0 of a descriptor pointer tag its space,
+- * 1 = system memory, 2 = engine-local (7B500 c06e99f8). Returns the physical
+- * address, or -1 when it is not inside that space.
+- */
+-static hwaddr amc_dma_addr(IPodTouchAMCState *s, bool local, uint32_t addr,
+-                           size_t size)
+-{
+-    if (local) {
+-        return amc_local(s, addr, size) ? s->buf_base + addr : -1;
+-    }
+-    return amc_dram(s, addr, size) ? addr : -1;
+-}
+-
+ static void amc_decode_fail(IPodTouchAMCState *s)
+ {
+     AMCDecoder *d = s->decoder;

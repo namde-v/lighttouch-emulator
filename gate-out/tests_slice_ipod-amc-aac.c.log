@@ -1,0 +1,6 @@
+Package libavcodec was not found in the pkg-config search path.
+Perhaps you should add the directory containing `libavcodec.pc'
+to the PKG_CONFIG_PATH environment variable
+Package 'libavcodec', required by 'virtual:world', not found
+Package 'libavutil', required by 'virtual:world', not found
+tests/slice/run.sh: line 80: xcrun: command not found

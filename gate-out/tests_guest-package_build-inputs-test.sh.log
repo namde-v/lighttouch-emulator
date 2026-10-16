@@ -1,0 +1,5 @@
+stat: cannot read file system information for '%Lp': No such file or directory
+stat: cannot read file system information for '%Lp': No such file or directory
+stat: cannot read file system information for '%Lp': No such file or directory
+stat: cannot read file system information for '%Lp': No such file or directory
+FAIL line 54: a mode change went unseen
