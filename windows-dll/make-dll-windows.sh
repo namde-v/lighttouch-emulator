@@ -39,7 +39,11 @@ case "$BUILD" in /*|*:*) ;; *) BUILD="$PWD/$BUILD" ;; esac
 case "$DEF" in /*|*:*) ;; *) DEF="$PWD/$DEF" ;; esac
 
 OUT="$BUILD/qemu-arm.dll"
-CC="${CC:-cc}"
+# CC may carry args: the workflow sets CC="ccache gcc". It must be split
+# into an argv array -- quoting "$CC" as one word fails with
+# "ccache gcc: command not found" (exit 127, run 40742705433 step 14).
+# The unquoted expansion is intentional (trusted env var, our own workflow).
+CC_ARGV=(${CC:-cc})
 HOST_CPU="x86_64"
 TCG_HOST="i386"
 DEP_CFLAGS="$(pkg-config --cflags glib-2.0 pixman-1)"
@@ -52,7 +56,7 @@ for f in "$SRC/contrib/ios-app/qemu-ios-entry.c" \
          "$SRC/contrib/ios-app/qemu-ios-ui.c" \
          "$SRC/contrib/macos-app/qemu-macos-extras.c"; do
     o="$(basename "${f%.c}").o"
-    "$CC" -c "$f" -o "$o" \
+    "${CC_ARGV[@]}" -c "$f" -o "$o" \
         -I. -I.. -Iqapi -Itrace -Iui \
         -I"$SRC/contrib/ios-app" -I"$SRC/contrib/macos-app" \
         $DEP_CFLAGS \
