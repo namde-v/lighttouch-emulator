@@ -69,7 +69,18 @@ done
 # Take ninja's own link line so this cannot drift from the real build.
 # eval (as in the macOS script) so shell-quoted args tokenize correctly;
 # the command comes from our own build dir, not untrusted input.
-eval "LINK_CMD=($(ninja -t commands qemu-system-arm | tail -1))"
+# The ninja target is the OUTPUT FILENAME: qemu-system-arm.exe on Windows
+# (the macOS script uses qemu-system-arm-unsigned for the same reason).
+# The bare name 'qemu-system-arm' is NOT a target here -- ninja errors
+# with 'unknown target' (run 40765284998 step 14).
+eval "LINK_CMD=($(ninja -t commands qemu-system-arm.exe | tail -1))"
+# Fail fast: a failing command inside $( ) does NOT trigger set -e, so
+# without this check an unknown target yields an empty LINK_CMD and the
+# script dies confusingly later at '-shared: command not found' (127).
+if [ "${#LINK_CMD[@]}" -eq 0 ]; then
+    echo "ninja link line empty for target qemu-system-arm.exe -- check the target name" >&2
+    exit 1
+fi
 # Pass 1: expand one level of @response-files, dropping @*.syms.
 # (CI paths contain no spaces, so naive whitespace splitting of .rsp
 # files -- one arg per line or space-separated -- is safe here.)
