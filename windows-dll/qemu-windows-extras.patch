@@ -1,0 +1,71 @@
+--- a/contrib/macos-app/qemu-macos-extras.c
++++ b/contrib/macos-app/qemu-macos-extras.c
+@@ -32,6 +32,8 @@
+ #include "qemu-main.h"
+ 
++#ifndef _WIN32
+ #include <dlfcn.h>
+ #include <mach-o/loader.h>
++#endif
+ 
+ #include "qemu-macos-extras.h"
+@@ -148,20 +150,35 @@
+ void qemu_ios_ui_key_mac(int mac_keycode, bool down)
+ {
++#ifdef _WIN32
++    /*
++     * Windows stub: no macOS keycode map exists here
++     * (qemu_input_map_osx_to_qcode is generated only for macOS hosts, and the
++     * Windows build has no such table). Silently ignored, matching this
++     * function's existing behaviour for unmapped keys (and for Command /
++     * Control). A Windows key event port (win32 keymap -> qcode) is future
++     * work, not Phase 1 of the Windows DLL. The symbol stays exported so the
++     * helper's required keyMac lookup still resolves.
++     */
++    (void)mac_keycode;
++    (void)down;
++    return;
++#else
+     int qcode;
+ 
+     if (mac_keycode < 0 ||
+         (unsigned)mac_keycode >= qemu_input_map_osx_to_qcode_len) {
+         return;
+     }
+     qcode = qemu_input_map_osx_to_qcode[mac_keycode];
+     switch (qcode) {
+     case Q_KEY_CODE_UNMAPPED:
+     /* Command and Control belong to the menu bar. */
+     case Q_KEY_CODE_META_L:
+     case Q_KEY_CODE_META_R:
+     case Q_KEY_CODE_CTRL:
+     case Q_KEY_CODE_CTRL_R:
+         return;
+     }
+     qemu_ios_ui_key(qcode, down);
++#endif
+ }
+@@ -760,6 +777,17 @@
+ /* Identify the loaded image, not an on-disk dylib a developer may replace. */
+ const char *qemu_ios_build_id(void)
+ {
++#ifdef _WIN32
++    /*
++     * Windows stub: the Mach-O LC_UUID identity does not exist on Windows
++     * (no mach_header, no dladdr). NULL is this function's existing
++     * "identity unavailable" signal -- the same value the macOS path returns
++     * when no UUID load command is found -- so callers that already tolerate
++     * NULL (the helper's buildID is optional) need no change. A PE-based
++     * identity (debug-directory CodeView GUID) is future work, not Phase 1.
++     */
++    return NULL;
++#else
+     static char identity[33];
+     static gsize ready;
+     if (g_once_init_enter(&ready)) {
+@@ -785,4 +813,5 @@
+         g_once_init_leave(&ready, 1);
+     }
+     return identity[0] ? identity : NULL;
++#endif
+ }
