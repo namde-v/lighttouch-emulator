@@ -81,6 +81,17 @@ if [ "${#LINK_CMD[@]}" -eq 0 ]; then
     echo "ninja link line empty for target qemu-system-arm.exe -- check the target name" >&2
     exit 1
 fi
+# Diagnostic for the missing-rsp question (run 40777790388 step 14):
+# print the link line's @-tokens and the build dir's rsp inventory, so
+# the next run decides whether a missing rsp is a path problem
+# (branch a) or an ephemeral-rsp problem (branch b). Compact on purpose:
+# the full link line runs to thousands of objects.
+echo "Link-line response-file tokens:"
+for a in "${LINK_CMD[@]}"; do
+    case "$a" in @*) echo "  $a" ;; esac
+done
+echo "Response files present in build dir:"
+ls -1 ./*.rsp 2>/dev/null || echo "  (no *.rsp in build dir)"
 # Pass 1: expand one level of @response-files, dropping @*.syms.
 # (CI paths contain no spaces, so naive whitespace splitting of .rsp
 # files -- one arg per line or space-separated -- is safe here.)
@@ -91,6 +102,13 @@ for a in "${LINK_CMD[@]}"; do
         @*)
             rsp="${a#@}"
             # RSP paths are relative to the build dir; we already cd'd there.
+            # Fail fast: a failing cat inside $( ) does NOT trigger set -e,
+            # so a missing rsp would otherwise silently drop the object list
+            # (run 40777790388 step 14: all 55 .def exports undefined).
+            if [ ! -f "$rsp" ]; then
+                echo "response file missing: $rsp (referenced by the exe link line)" >&2
+                exit 1
+            fi
             for token in $(cat "$rsp"); do LINK+=("$token"); done
             ;;
         *) LINK+=("$a") ;;
