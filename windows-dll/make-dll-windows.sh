@@ -14,9 +14,12 @@
 #     the time this step runs (run 40788851368 step 14: the exe link
 #     succeeded during Build, yet the build dir holds zero *.rsp).
 #     Replaying the rsp-based link line by hand cannot work (branch b),
-#     so Pass 1 enumerates the exe target's objects directly from
-#     meson's per-target object dir instead of expanding @rsp.
-#     @*.syms are exe-only and dropped, as on macOS.
+#     and enumerating the exe's object dir cannot either (branch b-v2,
+#     run 40798501224 step 14: qemu-system-arm.exe.p holds zero .o --
+#     the exe's objects live in the libraries' .p dirs via
+#     extract_all_objects). So Pass 1 reads the object list from the
+#     build graph itself: the LINK edge for qemu-system-arm.exe in
+#     build.ninja. @*.syms are exe-only and dropped, as on macOS.
 #   - No -undefined / --unresolved-symbols tolerance exists for Windows
 #     DLLs: the link must resolve everything. The exe link line already
 #     resolves everything except the patched extras, so this should hold;
@@ -96,17 +99,28 @@ for a in "${LINK_CMD[@]}"; do
 done
 echo "Response files present in build dir:"
 ls -1 ./*.rsp 2>/dev/null || echo "  (no *.rsp in build dir)"
-# Pass 1 (branch b): do NOT expand @rsp -- the file is gone by now.
-# Enumerate the exe target's objects directly from meson's per-target
-# object dir. Primary: qemu-system-arm.exe.p. Fallback (the .exe suffix
-# in the dir name is not certain -- meson may name it without it): the
-# *.p dir containing the anchor object system_main.c.o, which is unique
-# to the exe target. Enumeration is lazy: it runs only if the link line
-# actually carries the known rsp token, so a future rsp-free link line
-# is not failed by a missing object dir. Object order among .o files
-# does not affect ld resolution (only archive order matters, and
-# archives stay in link-line order); the list is sorted for a stable
-# debug link script. (CI paths contain no spaces.)
+# Side observation (run 40798501224 step 14: exe .p dir holds zero .o):
+# record what the exe object dir actually contains, without depending
+# on it. Compact: first 20 entries + count.
+echo "exe object dir listing:"
+if [ -d qemu-system-arm.exe.p ]; then
+    ls -1 qemu-system-arm.exe.p/ 2>/dev/null | head -20
+    echo "  (count: $(ls -1 qemu-system-arm.exe.p/ 2>/dev/null | wc -l) entries)"
+else
+    echo "  (no qemu-system-arm.exe.p dir)"
+fi
+# Pass 1 (branch b-v2): do NOT expand @rsp -- the file is gone by now
+# -- and do NOT enumerate object dirs (run 40798501224 step 14 proved
+# the exe .p dir holds zero .o: the exe's objects live in the
+# libraries' .p dirs via extract_all_objects). Instead, read the object
+# list from the build graph: the LINK edge for qemu-system-arm.exe in
+# build.ninja. The edge's explicit inputs ARE the link's objects, in
+# link order; implicit (| ...) and order-only (|| ...) deps are cut.
+# Parsing is lazy: it runs only if the link line actually carries the
+# known rsp token, so a future rsp-free link line is not failed by a
+# missing edge. Object order among .o files does not affect ld
+# resolution (only archive order matters, and archives stay in
+# link-line order). (CI paths contain no spaces.)
 LINK=()
 EXE_OBJS_DONE=0
 EXE_OBJS=()
@@ -114,39 +128,37 @@ for a in "${LINK_CMD[@]}"; do
     case "$a" in
         @*.syms) ;;  # exe-only symbol lists; the DLL uses its own .def
         @qemu-system-arm.exe.rsp)
-            # The known rsp: its content IS the object list, enumerated
-            # directly (ninja deletes the rsp after the build).
+            # The known rsp: its content IS the exe link's object list,
+            # read from build.ninja (ninja deletes the rsp after the
+            # build, so the edge is the only faithful record of it).
             if [ "$EXE_OBJS_DONE" = 0 ]; then
-                OBJDIR=""
-                if [ -d "qemu-system-arm.exe.p" ]; then
-                    OBJDIR="qemu-system-arm.exe.p"
-                else
-                    for d in *.p; do
-                        [ -d "$d" ] || continue
-                        if [ -n "$(find "$d" -name 'system_main.c.o' -print -quit 2>/dev/null)" ]; then
-                            OBJDIR="$d"
-                            break
-                        fi
-                    done
+                if [ ! -f build.ninja ]; then
+                    echo "build.ninja not found in build dir (needed for the LINK-edge object list)" >&2
+                    exit 1
                 fi
+                mapfile -t EXE_OBJS < <(awk '
+                    /^build qemu-system-arm\.exe:/ { cap=1 }
+                    cap {
+                      l=$0
+                      while (l ~ / \$$/) { sub(/ \$$/, "", l); if ((getline nxt) <= 0) break; l = l " " nxt }
+                      sub(/ \|.*$/, "", l)
+                      n = split(l, f, /[ \t]+/)
+                      start = 0
+                      for (i=1; i<=n; i++) if (f[i] ~ /:$/) { start = i + 2; break }
+                      if (start == 0) exit 1
+                      for (i=start; i<=n; i++) if (f[i] ~ /\.o$/) print f[i]
+                      exit
+                    }' build.ninja)
                 # Fail fast: without the object list the link would
                 # silently produce a DLL missing every entry object
                 # (run 40777790388 step 14: all 55 .def exports undefined).
-                if [ -z "$OBJDIR" ]; then
-                    echo "exe object dir not found: neither qemu-system-arm.exe.p nor a *.p dir containing system_main.c.o" >&2
-                    echo "candidate object dirs:" >&2
-                    # Redirect order matters: stdout to stderr FIRST,
-                    # then stderr to /dev/null -- the reverse order
-                    # (2>/dev/null >&2) would swallow the listing.
-                    ls -d ./*.p >&2 2>/dev/null || echo "  (no *.p dirs in build dir)" >&2
-                    exit 1
-                fi
-                mapfile -t EXE_OBJS < <(find "$OBJDIR" -name '*.o' | sort)
                 if [ "${#EXE_OBJS[@]}" -eq 0 ]; then
-                    echo "no .o files in $OBJDIR" >&2
+                    echo "no .o inputs on the qemu-system-arm.exe LINK edge in build.ninja" >&2
+                    echo "qemu-system-arm edges (build, output, rule only):" >&2
+                    awk '/^build qemu-system-arm/ { print "  " $1, $2, $3 }' build.ninja >&2
                     exit 1
                 fi
-                echo "exe objects: ${#EXE_OBJS[@]} .o files from $OBJDIR"
+                echo "exe objects: ${#EXE_OBJS[@]} .o files from the qemu-system-arm.exe LINK edge"
                 EXE_OBJS_DONE=1
             fi
             LINK+=("${EXE_OBJS[@]}")
