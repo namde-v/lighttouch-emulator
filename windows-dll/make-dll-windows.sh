@@ -19,7 +19,10 @@
 #     the exe's objects live in the libraries' .p dirs via
 #     extract_all_objects). So Pass 1 reads the object list from the
 #     build graph itself: the LINK edge for qemu-system-arm.exe in
-#     build.ninja. @*.syms are exe-only and dropped, as on macOS.
+#     build.ninja, printing its input suffix histogram first (run
+#     40807517166 step 14: meson on Windows uses .obj, and the .o-only
+#     filter + .o-only swap silently dropped the bulk and the entry
+#     objects). @*.syms are exe-only and dropped, as on macOS.
 #   - No -undefined / --unresolved-symbols tolerance exists for Windows
 #     DLLs: the link must resolve everything. The exe link line already
 #     resolves everything except the patched extras, so this should hold;
@@ -136,7 +139,11 @@ for a in "${LINK_CMD[@]}"; do
                     echo "build.ninja not found in build dir (needed for the LINK-edge object list)" >&2
                     exit 1
                 fi
-                mapfile -t EXE_OBJS < <(awk '
+                # Read ALL explicit edge inputs first (one per line),
+                # then histogram + filter in bash. Filtering inside awk
+                # hid the input shape on run 40798501224 step 14 (the
+                # .o-only filter dropped the .obj bulk silently).
+                mapfile -t EDGE_INPUTS < <(awk '
                     /^build qemu-system-arm\.exe:/ { cap=1 }
                     cap {
                       l=$0
@@ -146,19 +153,58 @@ for a in "${LINK_CMD[@]}"; do
                       start = 0
                       for (i=1; i<=n; i++) if (f[i] ~ /:$/) { start = i + 2; break }
                       if (start == 0) exit 1
-                      for (i=start; i<=n; i++) if (f[i] ~ /\.o$/) print f[i]
+                      for (i=start; i<=n; i++) print f[i]
                       exit
                     }' build.ninja)
                 # Fail fast: without the object list the link would
                 # silently produce a DLL missing every entry object
                 # (run 40777790388 step 14: all 55 .def exports undefined).
-                if [ "${#EXE_OBJS[@]}" -eq 0 ]; then
-                    echo "no .o inputs on the qemu-system-arm.exe LINK edge in build.ninja" >&2
+                if [ "${#EDGE_INPUTS[@]}" -eq 0 ]; then
+                    echo "no inputs on the qemu-system-arm.exe LINK edge in build.ninja" >&2
                     echo "qemu-system-arm edges (build, output, rule only):" >&2
                     awk '/^build qemu-system-arm/ { print "  " $1, $2, $3 }' build.ninja >&2
                     exit 1
                 fi
-                echo "exe objects: ${#EXE_OBJS[@]} .o files from the qemu-system-arm.exe LINK edge"
+                # Suffix histogram (run 40807517166 step 14): meson on
+                # Windows uses .obj, NOT .o -- print the shape before
+                # filtering, so a future suffix surprise is visible in
+                # the log instead of silently dropping the bulk again.
+                n_obj=0; n_o=0; n_a=0; n_lib=0; n_other=0
+                main_found=0
+                for t in "${EDGE_INPUTS[@]}"; do
+                    case "$t" in
+                        *.obj) n_obj=$((n_obj+1)) ;;
+                        *.o) n_o=$((n_o+1)) ;;
+                        *.a) n_a=$((n_a+1)) ;;
+                        *.lib) n_lib=$((n_lib+1)) ;;
+                        *) n_other=$((n_other+1)) ;;
+                    esac
+                    case "$t" in
+                        *system_main.c.obj|*system_main.c.o) main_found=1 ;;
+                    esac
+                done
+                echo "LINK edge inputs: total ${#EDGE_INPUTS[@]} (.obj $n_obj, .o $n_o, .a $n_a, .lib $n_lib, other $n_other)"
+                echo "LINK edge inputs (first 10):"
+                for ((i=0; i<${#EDGE_INPUTS[@]} && i<10; i++)); do
+                    echo "  ${EDGE_INPUTS[$i]}"
+                done
+                if [ "$main_found" = 1 ]; then
+                    echo "system_main object on LINK edge: yes"
+                else
+                    echo "system_main object on LINK edge: NO"
+                fi
+                # Filter: link objects are .obj (Windows meson) plus
+                # .o (the run-7 straggler). Archives (.a/.lib) stay on
+                # the LINK_CMD token side, as in the exe link.
+                EXE_OBJS=()
+                for t in "${EDGE_INPUTS[@]}"; do
+                    case "$t" in *.obj|*.o) EXE_OBJS+=("$t") ;; esac
+                done
+                if [ "${#EXE_OBJS[@]}" -eq 0 ]; then
+                    echo "no link objects (.obj/.o) on the qemu-system-arm.exe LINK edge" >&2
+                    exit 1
+                fi
+                echo "exe objects: ${#EXE_OBJS[@]} link objects (.obj/.o) from the qemu-system-arm.exe LINK edge"
                 EXE_OBJS_DONE=1
             fi
             LINK+=("${EXE_OBJS[@]}")
@@ -176,17 +222,29 @@ for a in "${LINK_CMD[@]}"; do
 done
 # Pass 2: rewrite -- drop -o + value, swap main() for qemu_ios_main(),
 # keep everything else (libs, flags, implib args) untouched.
+# Both suffixes: meson on Windows uses .obj (run 40807517166 step 14
+# proved the .o-only swap never fired, so no entry object was linked
+# and ld reported all 55 exports undefined with zero undefined refs).
 ARGS=()
 skip=0
+swapped=0
 for a in "${LINK[@]}"; do
     if [ "$skip" = 1 ]; then skip=0; continue; fi
     case "$a" in
         -o) skip=1 ;;                                   # drop the executable name
-        *system_main.c.o)                               # main() -> qemu_ios_main()
-            ARGS+=(qemu-ios-entry.o qemu-ios-ui.o qemu-macos-extras.o) ;;
+        *system_main.c.o|*system_main.c.obj)            # main() -> qemu_ios_main()
+            ARGS+=(qemu-ios-entry.o qemu-ios-ui.o qemu-macos-extras.o)
+            swapped=1 ;;
         *) ARGS+=("$a") ;;
     esac
 done
+# Fail fast on swap-miss: the entry objects define the DLL's ABI, so a
+# link without them is doomed (run 40807517166 step 14) and must be a
+# loud error, not a silent 55-error link.
+if [ "$swapped" = 0 ]; then
+    echo "system_main object not found in link inputs -- entry objects (qemu_ios_main) cannot be linked; refusing a doomed link" >&2
+    exit 1
+fi
 ARGS+=(-shared -o "$OUT" "$DEF")
 printf '%q ' "${ARGS[@]}" > windows-link-dll.sh
 echo >> windows-link-dll.sh

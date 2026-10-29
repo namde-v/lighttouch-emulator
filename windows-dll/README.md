@@ -21,13 +21,17 @@ Phase 1 artifacts: everything needed to link `qemu-arm.dll` from the
   `qemu-macos-extras.c` with the build's own flags, steal ninja's link
   line for `qemu-system-arm`, rewrite it (drop `-o`, swap
   `system_main.c.o` for the three entry objects, drop `@*.syms`,
-  replace the `@response-file` token with the LINK edge's explicit `.o`
-  inputs from `build.ninja` instead of expanding `@response-files` —
+  replace the `@response-file` token with the LINK edge's explicit link
+  objects from `build.ninja` instead of expanding `@response-files` —
   ninja generates the rsp on demand and it is gone by step-14 time
   (branch b, run 40788851368), so replaying the rsp-based link line by
   hand cannot work, and the exe's objects live in the libraries' `.p`
   dirs via `extract_all_objects`, not in `qemu-system-arm.exe.p`
-  (branch b-v2, run 40798501224)), append
+  (branch b-v2, run 40798501224). Pass 1 prints the edge's input suffix
+  histogram first and accepts `.obj` (meson on Windows uses `.obj`, not
+  `.o` — run 40807517166 proved the `.o`-only filter + `.o`-only swap
+  silently dropped the bulk and the entry objects); the swap fails fast
+  if no `system_main` object is found. Append
   `-shared -o qemu-arm.dll qemu-arm.def`. No undefined-symbol tolerance
   exists for Windows DLLs; the link must resolve everything.
 - `qemu-windows-extras.patch` — applied to `qemu-src` BEFORE configure
