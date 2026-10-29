@@ -10,9 +10,13 @@
 #     (key_mac's osx keymap, build_id's Mach-O UUID) on _WIN32. Without it
 #     the link fails on undefined qemu_input_map_osx_to_qcode / dladdr.
 #   - Meson uses @response-files for the link on Windows (long command
-#     lines). The script expands one level of @rsp (except @*.syms, which
-#     are exe-only and dropped, as on macOS) BEFORE rewriting. The macOS
-#     script's @-dropping would delete the object list on Windows.
+#     lines), but ninja generates the rsp ON DEMAND and it is gone by
+#     the time this step runs (run 40788851368 step 14: the exe link
+#     succeeded during Build, yet the build dir holds zero *.rsp).
+#     Replaying the rsp-based link line by hand cannot work (branch b),
+#     so Pass 1 enumerates the exe target's objects directly from
+#     meson's per-target object dir instead of expanding @rsp.
+#     @*.syms are exe-only and dropped, as on macOS.
 #   - No -undefined / --unresolved-symbols tolerance exists for Windows
 #     DLLs: the link must resolve everything. The exe link line already
 #     resolves everything except the patched extras, so this should hold;
@@ -81,35 +85,79 @@ if [ "${#LINK_CMD[@]}" -eq 0 ]; then
     echo "ninja link line empty for target qemu-system-arm.exe -- check the target name" >&2
     exit 1
 fi
-# Diagnostic for the missing-rsp question (run 40777790388 step 14):
-# print the link line's @-tokens and the build dir's rsp inventory, so
-# the next run decides whether a missing rsp is a path problem
-# (branch a) or an ephemeral-rsp problem (branch b). Compact on purpose:
-# the full link line runs to thousands of objects.
+# Diagnostic (runs 40777790388 + 40788851368 step 14): print the link
+# line's @-tokens and the build dir's rsp inventory. The rsp is gone by
+# step-14 time (branch b, decided on run 40788851368), so this is a
+# record of the link-line shape, not an input to Pass 1. Compact on
+# purpose: the full link line runs to thousands of objects.
 echo "Link-line response-file tokens:"
 for a in "${LINK_CMD[@]}"; do
     case "$a" in @*) echo "  $a" ;; esac
 done
 echo "Response files present in build dir:"
 ls -1 ./*.rsp 2>/dev/null || echo "  (no *.rsp in build dir)"
-# Pass 1: expand one level of @response-files, dropping @*.syms.
-# (CI paths contain no spaces, so naive whitespace splitting of .rsp
-# files -- one arg per line or space-separated -- is safe here.)
+# Pass 1 (branch b): do NOT expand @rsp -- the file is gone by now.
+# Enumerate the exe target's objects directly from meson's per-target
+# object dir. Primary: qemu-system-arm.exe.p. Fallback (the .exe suffix
+# in the dir name is not certain -- meson may name it without it): the
+# *.p dir containing the anchor object system_main.c.o, which is unique
+# to the exe target. Enumeration is lazy: it runs only if the link line
+# actually carries the known rsp token, so a future rsp-free link line
+# is not failed by a missing object dir. Object order among .o files
+# does not affect ld resolution (only archive order matters, and
+# archives stay in link-line order); the list is sorted for a stable
+# debug link script. (CI paths contain no spaces.)
 LINK=()
+EXE_OBJS_DONE=0
+EXE_OBJS=()
 for a in "${LINK_CMD[@]}"; do
     case "$a" in
         @*.syms) ;;  # exe-only symbol lists; the DLL uses its own .def
-        @*)
-            rsp="${a#@}"
-            # RSP paths are relative to the build dir; we already cd'd there.
-            # Fail fast: a failing cat inside $( ) does NOT trigger set -e,
-            # so a missing rsp would otherwise silently drop the object list
-            # (run 40777790388 step 14: all 55 .def exports undefined).
-            if [ ! -f "$rsp" ]; then
-                echo "response file missing: $rsp (referenced by the exe link line)" >&2
-                exit 1
+        @qemu-system-arm.exe.rsp)
+            # The known rsp: its content IS the object list, enumerated
+            # directly (ninja deletes the rsp after the build).
+            if [ "$EXE_OBJS_DONE" = 0 ]; then
+                OBJDIR=""
+                if [ -d "qemu-system-arm.exe.p" ]; then
+                    OBJDIR="qemu-system-arm.exe.p"
+                else
+                    for d in *.p; do
+                        [ -d "$d" ] || continue
+                        if [ -n "$(find "$d" -name 'system_main.c.o' -print -quit 2>/dev/null)" ]; then
+                            OBJDIR="$d"
+                            break
+                        fi
+                    done
+                fi
+                # Fail fast: without the object list the link would
+                # silently produce a DLL missing every entry object
+                # (run 40777790388 step 14: all 55 .def exports undefined).
+                if [ -z "$OBJDIR" ]; then
+                    echo "exe object dir not found: neither qemu-system-arm.exe.p nor a *.p dir containing system_main.c.o" >&2
+                    echo "candidate object dirs:" >&2
+                    # Redirect order matters: stdout to stderr FIRST,
+                    # then stderr to /dev/null -- the reverse order
+                    # (2>/dev/null >&2) would swallow the listing.
+                    ls -d ./*.p >&2 2>/dev/null || echo "  (no *.p dirs in build dir)" >&2
+                    exit 1
+                fi
+                mapfile -t EXE_OBJS < <(find "$OBJDIR" -name '*.o' | sort)
+                if [ "${#EXE_OBJS[@]}" -eq 0 ]; then
+                    echo "no .o files in $OBJDIR" >&2
+                    exit 1
+                fi
+                echo "exe objects: ${#EXE_OBJS[@]} .o files from $OBJDIR"
+                EXE_OBJS_DONE=1
             fi
-            for token in $(cat "$rsp"); do LINK+=("$token"); done
+            LINK+=("${EXE_OBJS[@]}")
+            ;;
+        @*)
+            # Any other @ token is unexpected: fail fast rather than
+            # silently dropping part of the link (the run-40777790388
+            # failure mode). This run shows exactly one @ token, but
+            # do not assume that holds forever.
+            echo "unexpected response-file token in exe link line: $a (only @qemu-system-arm.exe.rsp is expected)" >&2
+            exit 1
             ;;
         *) LINK+=("$a") ;;
     esac
