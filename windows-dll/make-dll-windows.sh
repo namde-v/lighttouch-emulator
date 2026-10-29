@@ -37,6 +37,10 @@
 #     archives + -l flags lived entirely inside the gone rsp, and
 #     re-deriving them from the persistent edge binding is the only
 #     recovery; @*.syms tokens there are exe-only and dropped).
+#     Meson quotes every LINK_ARGS element in the binding, so each
+#     token gets one pair of surrounding double quotes stripped before
+#     use (run 40830162711 step 14: un stripped tokens made ld reject
+#     all 51 with `cannot find "<token>": Invalid argument`).
 #   - No -undefined / --unresolved-symbols tolerance exists for Windows
 #     DLLs: the link must resolve everything. The exe link line already
 #     resolves everything except the patched extras, so this should hold;
@@ -255,10 +259,29 @@ for a in "${LINK_CMD[@]}"; do
                     exit 1
                 fi
                 read -ra LINK_ARGS_TOKENS <<< "$LINK_ARGS_RAW"
-                echo "exe LINK_ARGS tokens: ${#LINK_ARGS_TOKENS[@]}"
-                for t in "${LINK_ARGS_TOKENS[@]}"; do echo "  LINK_ARG: $t"; done
-                LINK_ARGS_FILTERED=()
+                # Quote-strip (run 40830162711 step 14): meson quotes
+                # every LINK_ARGS element in the build.ninja binding,
+                # and the tokens above arrive WITH those quotes. Passing
+                # them through literally makes ld reject all 51 tokens
+                # (`cannot find "-Wl,...": Invalid argument`, including
+                # -lws2_32/-lm and existing absolute .dll.a paths).
+                # Strip ONE pair of surrounding double quotes per token
+                # (only when it starts AND ends with `"` and is at least
+                # 2 chars); unquoted tokens pass through untouched, so
+                # this is meson-version-agnostic. Strip BEFORE print
+                # and filter, so the diagnostics show the real tokens
+                # and the @*.syms drop / @ fail-fast see bare tokens.
+                LINK_ARGS_STRIPPED=()
                 for t in "${LINK_ARGS_TOKENS[@]}"; do
+                    if [ "${#t}" -ge 2 ] && [ "${t:0:1}" = '"' ] && [ "${t: -1}" = '"' ]; then
+                        t="${t:1:-1}"
+                    fi
+                    LINK_ARGS_STRIPPED+=("$t")
+                done
+                echo "exe LINK_ARGS tokens: ${#LINK_ARGS_STRIPPED[@]}"
+                for t in "${LINK_ARGS_STRIPPED[@]}"; do echo "  LINK_ARG: $t"; done
+                LINK_ARGS_FILTERED=()
+                for t in "${LINK_ARGS_STRIPPED[@]}"; do
                     case "$t" in
                         @*.syms)
                             echo "  (dropping exe-only symbol list from LINK_ARGS: $t -- the DLL uses its own .def)" ;;

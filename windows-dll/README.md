@@ -46,7 +46,11 @@ Phase 1 artifacts: everything needed to link `qemu-arm.dll` from the
   carries zero libraries (run 40822922641: 39,106 undefined refs
   from an objects-only link) — the binding is the persistent record
   of the exe link's archives + `-l` flags, and `@*.syms` tokens in
-  it are exe-only and dropped. No undefined-symbol tolerance
+  it are exe-only and dropped. Meson quotes every `LINK_ARGS`
+  element in the binding, so each token gets one pair of surrounding
+  double quotes stripped before use (run 40830162711: unstripped
+  tokens made ld reject all 51 with `cannot find "<token>"`).
+  No undefined-symbol tolerance
   exists for Windows DLLs; the link must resolve everything.
 - `qemu-windows-extras.patch` — applied to `qemu-src` BEFORE configure
   (same pattern as the workflow's `win32-portability.patch`). Three
