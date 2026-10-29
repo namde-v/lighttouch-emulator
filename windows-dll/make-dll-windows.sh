@@ -23,6 +23,14 @@
 #     40807517166 step 14: meson on Windows uses .obj, and the .o-only
 #     filter + .o-only swap silently dropped the bulk and the entry
 #     objects). @*.syms are exe-only and dropped, as on macOS.
+#     The final link runs through a NEW response file
+#     (windows-link-objs.rsp, one object per line): 1172 object paths
+#     exceed Windows' 32,768-char command-line limit (run 40816130822
+#     step 14: 'Argument list too long', 126), so a direct gcc
+#     invocation cannot work -- exactly why the exe link itself uses
+#     @qemu-system-arm.exe.rsp. The @rsp token takes the first
+#     object's position; ninja's compiler token stays first, since the
+#     invocation is plain "${ARGS[@]}" with no compiler prefix.
 #   - No -undefined / --unresolved-symbols tolerance exists for Windows
 #     DLLs: the link must resolve everything. The exe link line already
 #     resolves everything except the patched extras, so this should hold;
@@ -225,6 +233,10 @@ done
 # Both suffixes: meson on Windows uses .obj (run 40807517166 step 14
 # proved the .o-only swap never fired, so no entry object was linked
 # and ld reported all 55 exports undefined with zero undefined refs).
+# NOTE: ARGS[0] must stay ninja's compiler token (e.g.
+# /mingw64/bin/gcc) -- the final invocation is plain "${ARGS[@]}" with
+# no compiler prefix, so the compiler position is load-bearing. Any
+# response-file rewrite below must NOT move a token ahead of it.
 ARGS=()
 skip=0
 swapped=0
@@ -245,6 +257,37 @@ if [ "$swapped" = 0 ]; then
     echo "system_main object not found in link inputs -- entry objects (qemu_ios_main) cannot be linked; refusing a doomed link" >&2
     exit 1
 fi
+# Response file (run 40816130822 step 14): 1172 object paths run to
+# ~70KB, far past Windows' 32,768-char CreateProcess limit, so a direct
+# gcc invocation dies with 'Argument list too long' (126) before ld
+# ever runs. The exe link already proves the mechanism on this exact
+# toolchain -- ninja passes @qemu-system-arm.exe.rsp with the same
+# ~1172 objects to the same MinGW gcc. Objects (including the swapped
+# entry objects) move one-per-line into windows-link-objs.rsp
+# (distinct from ninja's rsp, which is gone by now; relative
+# forward-slash paths, no spaces -- CI paths have no spaces), and the
+# @rsp token takes the FIRST object's position, so the compiler stays
+# first and every other token keeps its order. Written only after the
+# swap check, so a swap-miss leaves no stale rsp behind.
+: > windows-link-objs.rsp
+FINAL=()
+rsp_inserted=0
+n_rsp=0
+for a in "${ARGS[@]}"; do
+    case "$a" in
+        *.obj|*.o)
+            if [ "$rsp_inserted" = 0 ]; then
+                FINAL+=("@windows-link-objs.rsp")
+                rsp_inserted=1
+            fi
+            printf '%s\n' "$a" >> windows-link-objs.rsp
+            n_rsp=$((n_rsp+1))
+            ;;
+        *) FINAL+=("$a") ;;
+    esac
+done
+echo "link objects response file: windows-link-objs.rsp ($n_rsp objects)"
+ARGS=("${FINAL[@]}")
 ARGS+=(-shared -o "$OUT" "$DEF")
 printf '%q ' "${ARGS[@]}" > windows-link-dll.sh
 echo >> windows-link-dll.sh

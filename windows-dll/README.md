@@ -31,8 +31,16 @@ Phase 1 artifacts: everything needed to link `qemu-arm.dll` from the
   histogram first and accepts `.obj` (meson on Windows uses `.obj`, not
   `.o` — run 40807517166 proved the `.o`-only filter + `.o`-only swap
   silently dropped the bulk and the entry objects); the swap fails fast
-  if no `system_main` object is found. Append
-  `-shared -o qemu-arm.dll qemu-arm.def`. No undefined-symbol tolerance
+  if no `system_main` object is found. Pass 2 then moves the objects
+  (including the swapped entry objects) one-per-line into a NEW
+  response file (`windows-link-objs.rsp`); the link runs as
+  `<compiler> @windows-link-objs.rsp <flags/archives> -shared -o
+  qemu-arm.dll qemu-arm.def`, because 1172 object paths (~70KB)
+  exceed Windows' 32,768-char command-line limit and a direct
+  invocation dies with 'Argument list too long' (run 40816130822) —
+  the exe link itself uses `@qemu-system-arm.exe.rsp` for the same
+  reason. The `@rsp` token takes the first object's position so the
+  compiler stays first. No undefined-symbol tolerance
   exists for Windows DLLs; the link must resolve everything.
 - `qemu-windows-extras.patch` — applied to `qemu-src` BEFORE configure
   (same pattern as the workflow's `win32-portability.patch`). Three
