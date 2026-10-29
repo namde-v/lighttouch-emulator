@@ -34,13 +34,19 @@ Phase 1 artifacts: everything needed to link `qemu-arm.dll` from the
   if no `system_main` object is found. Pass 2 then moves the objects
   (including the swapped entry objects) one-per-line into a NEW
   response file (`windows-link-objs.rsp`); the link runs as
-  `<compiler> @windows-link-objs.rsp <flags/archives> -shared -o
+  `<compiler> @windows-link-objs.rsp <LINK_ARGS> -shared -o
   qemu-arm.dll qemu-arm.def`, because 1172 object paths (~70KB)
   exceed Windows' 32,768-char command-line limit and a direct
   invocation dies with 'Argument list too long' (run 40816130822) —
   the exe link itself uses `@qemu-system-arm.exe.rsp` for the same
   reason. The `@rsp` token takes the first object's position so the
-  compiler stays first. No undefined-symbol tolerance
+  compiler stays first. The `<LINK_ARGS>` are re-derived from the
+  LINK edge's `LINK_ARGS` binding in `build.ninja`: meson's `_RSP`
+  rule command is literally `cc @$out.rsp`, so `ninja -t commands`
+  carries zero libraries (run 40822922641: 39,106 undefined refs
+  from an objects-only link) — the binding is the persistent record
+  of the exe link's archives + `-l` flags, and `@*.syms` tokens in
+  it are exe-only and dropped. No undefined-symbol tolerance
   exists for Windows DLLs; the link must resolve everything.
 - `qemu-windows-extras.patch` — applied to `qemu-src` BEFORE configure
   (same pattern as the workflow's `win32-portability.patch`). Three

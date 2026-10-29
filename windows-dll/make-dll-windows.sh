@@ -31,6 +31,12 @@
 #     @qemu-system-arm.exe.rsp. The @rsp token takes the first
 #     object's position; ninja's compiler token stays first, since the
 #     invocation is plain "${ARGS[@]}" with no compiler prefix.
+#     Libraries come from the edge's LINK_ARGS binding in build.ninja
+#     (run 40822922641 step 14: meson's _RSP rule command is literally
+#     `cc @$out.rsp`, so LINK_CMD carries zero libs -- the exe link's
+#     archives + -l flags lived entirely inside the gone rsp, and
+#     re-deriving them from the persistent edge binding is the only
+#     recovery; @*.syms tokens there are exe-only and dropped).
 #   - No -undefined / --unresolved-symbols tolerance exists for Windows
 #     DLLs: the link must resolve everything. The exe link line already
 #     resolves everything except the patched extras, so this should hold;
@@ -135,6 +141,8 @@ fi
 LINK=()
 EXE_OBJS_DONE=0
 EXE_OBJS=()
+LINK_ARGS_FROM_EDGE=0
+LINK_ARGS_FILTERED=()
 for a in "${LINK_CMD[@]}"; do
     case "$a" in
         @*.syms) ;;  # exe-only symbol lists; the DLL uses its own .def
@@ -213,6 +221,54 @@ for a in "${LINK_CMD[@]}"; do
                     exit 1
                 fi
                 echo "exe objects: ${#EXE_OBJS[@]} link objects (.obj/.o) from the qemu-system-arm.exe LINK edge"
+                # LINK_ARGS (run 40822922641 step 14): when meson uses
+                # a response file for a long link, it switches to a
+                # separate _RSP rule whose command is literally
+                # `cc @$out.rsp` -- the rspfile_content is $ARGS +
+                # output_args + $in + $LINK_ARGS, so EVERYTHING except
+                # the compiler went into the gone rsp. `ninja -t
+                # commands` therefore prints just [cc, @rsp]: LINK_CMD
+                # carries ZERO libraries, and the DLL link built from
+                # it is objects-only (39,106 undefined refs on run 9:
+                # libqemuutil + glib + pixman + SDL, all missing-input
+                # class). The edge's LINK_ARGS binding in build.ninja
+                # is PERSISTENT (unlike the rsp) and is the recoverable
+                # record of those libraries -- parse it here, in the
+                # same @rsp branch, so it applies only in the RSP case
+                # (a non-RSP link line already carries its libs inline
+                # and must not get them doubled).
+                LINK_ARGS_RAW=$(awk '
+                    /^build qemu-system-arm\.exe:/ {
+                      l=$0
+                      while (l ~ / \$$/) { sub(/ \$$/, "", l); if ((getline nxt) <= 0) break; l = l " " nxt }
+                      cap=1
+                      next
+                    }
+                    cap {
+                      if ($0 !~ /^ /) exit
+                      l=$0
+                      while (l ~ / \$$/) { sub(/ \$$/, "", l); if ((getline nxt) <= 0) break; l = l " " nxt }
+                      if (l ~ /^ LINK_ARGS = /) { sub(/^ LINK_ARGS = /, "", l); print l; exit }
+                    }' build.ninja)
+                if [ -z "$LINK_ARGS_RAW" ]; then
+                    echo "no LINK_ARGS binding on the qemu-system-arm.exe edge in build.ninja" >&2
+                    exit 1
+                fi
+                read -ra LINK_ARGS_TOKENS <<< "$LINK_ARGS_RAW"
+                echo "exe LINK_ARGS tokens: ${#LINK_ARGS_TOKENS[@]}"
+                for t in "${LINK_ARGS_TOKENS[@]}"; do echo "  LINK_ARG: $t"; done
+                LINK_ARGS_FILTERED=()
+                for t in "${LINK_ARGS_TOKENS[@]}"; do
+                    case "$t" in
+                        @*.syms)
+                            echo "  (dropping exe-only symbol list from LINK_ARGS: $t -- the DLL uses its own .def)" ;;
+                        @*)
+                            echo "unexpected response-file token in exe LINK_ARGS: $t" >&2
+                            exit 1 ;;
+                        *) LINK_ARGS_FILTERED+=("$t") ;;
+                    esac
+                done
+                LINK_ARGS_FROM_EDGE=1
                 EXE_OBJS_DONE=1
             fi
             LINK+=("${EXE_OBJS[@]}")
@@ -288,6 +344,13 @@ for a in "${ARGS[@]}"; do
 done
 echo "link objects response file: windows-link-objs.rsp ($n_rsp objects)"
 ARGS=("${FINAL[@]}")
+# LINK_ARGS after the objects, before -shared -- mirroring exe order
+# (objects then LINK_ARGS). Only in the RSP case (flag set in Pass 1);
+# a non-RSP link line already carries its libs inline.
+if [ "$LINK_ARGS_FROM_EDGE" = 1 ]; then
+    echo "appending ${#LINK_ARGS_FILTERED[@]} LINK_ARGS tokens from the build.ninja edge"
+    ARGS+=("${LINK_ARGS_FILTERED[@]}")
+fi
 ARGS+=(-shared -o "$OUT" "$DEF")
 printf '%q ' "${ARGS[@]}" > windows-link-dll.sh
 echo >> windows-link-dll.sh
